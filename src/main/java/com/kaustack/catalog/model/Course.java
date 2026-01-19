@@ -1,36 +1,25 @@
 package com.kaustack.catalog.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.persistence.*;
-
-import lombok.*;
-
-import java.util.UUID;
+import lombok.Data;
+import java.util.List;
 
 @Entity
-@Table(name = "courses", uniqueConstraints = {
-        @UniqueConstraint(columnNames = {"code", "number"}, name = "uk_course_code_number")
+@Table(name = "Subject", uniqueConstraints = {
+        @UniqueConstraint(columnNames = {"code", "number"})
 })
-@NoArgsConstructor
-@AllArgsConstructor
-@Builder
-@Getter
+@Data
 public class Course {
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
-    @Column(nullable = false, updatable = false, unique = true)
-    private UUID id;
+    private String id;
 
-    @Setter
-    @Column(nullable = false)
-    private String name;
-
-    @Setter
-    @Column(nullable = false)
+    private String title;
     private String code;
+    private String number;
 
-    @Setter
-    @Column(nullable = false)
-    private int number;
-
+    @OneToMany(mappedBy = "course")
+    @JsonIgnoreProperties("course")
+    private List<Section> sections;
 }
-
