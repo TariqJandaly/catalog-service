@@ -4,6 +4,9 @@ import com.kaustack.catalog.dto.InstructorHierarchyDTO;
 import com.kaustack.catalog.model.Schedule;
 import com.kaustack.catalog.model.Section;
 import com.kaustack.catalog.model.Term;
+import com.kaustack.catalog.model.Course;
+import com.kaustack.catalog.model.Instructor;
+import com.kaustack.catalog.repository.ScheduleRepository;
 import com.kaustack.catalog.repository.SectionRepository;
 import com.kaustack.catalog.repository.TermRepository;
 import jakarta.persistence.criteria.*;
@@ -26,152 +29,116 @@ public class CatalogService {
 
     @Autowired
     private TermRepository termRepository;
+    @Autowired
+    private ScheduleRepository scheduleRepository;
 
-    // Helper: Convert "HH:MM" to minutes-since-midnight
-    private Integer parseTimeBytes(String timeStr) {
-        if (timeStr == null || !timeStr.matches("\\d{1,2}:\\d{2}")) return null;
-        String[] parts = timeStr.split(":");
-        return Integer.parseInt(parts[0]) * 60 + Integer.parseInt(parts[1]);
+    public List<Map<String, Object>> getCourses(String termCode, String q) {
+        Term term = resolveTerm(termCode);
+        List<Course> courses = sectionRepository.findUniqueCoursesByTerm(term.getId());
+
+        return courses.stream()
+                .filter(c -> q == null ||
+                        c.getCode().toLowerCase().contains(q.toLowerCase()) ||
+                        c.getTitle().toLowerCase().contains(q.toLowerCase()))
+                .map(c -> {
+                    Map<String, Object> map = new LinkedHashMap<>();
+                    map.put("id", c.getId());
+                    map.put("code", c.getCode());
+                    map.put("number", c.getNumber());
+                    map.put("title", c.getTitle());
+                    map.put("fullCode", c.getCode() + "-" + c.getNumber());
+                    return map;
+                })
+                .sorted(Comparator.comparing(m -> (String) m.get("fullCode")))
+                .collect(Collectors.toList());
+    }
+
+    public List<Section> getSectionsByCourse(String termCode, String courseId, String gender) {
+        Term term = resolveTerm(termCode);
+        List<Section> sections = sectionRepository.findByTermIdAndCourseId(term.getId(), courseId);
+
+        if (gender == null || gender.isEmpty()) return sections;
+
+        String mappedGender = mapGender(gender);
+        return sections.stream()
+                .filter(s -> {
+                    if (s.getBranch() == null) return false;
+                    assert mappedGender != null;
+                    return s.getBranch().contains(mappedGender);
+                })
+                .collect(Collectors.toList());
+    }
+
+    public List<Map<String, Object>> getInstructors(String termCode, String q) {
+        Term term = resolveTerm(termCode);
+        List<Instructor> instructors = sectionRepository.findUniqueInstructorsByTerm(term.getId());
+
+        return instructors.stream()
+                .filter(i -> q == null || i.getName().toLowerCase().contains(q.toLowerCase()))
+                .map(i -> {
+                    Map<String, Object> map = new LinkedHashMap<>();
+                    map.put("id", i.getId());
+                    map.put("name", i.getName());
+                    map.put("email", i.getEmail());
+                    return map;
+                })
+                .sorted(Comparator.comparing(m -> (String) m.get("name")))
+                .collect(Collectors.toList());
     }
 
     public Page<Section> search(
-            String termCode,
-            String q,
-            int page,
-            int limit,
-            String days,
-            String instructor,
-            String startTime,
-            String endTime,
-            String level,
-            String crn,
-            String sectionCode,
-            String gender,
-            String branch
+            String termCode, String q, int page, int limit, String days,
+            String instructor, String startTime, String endTime,
+            String level, String crn, String sectionCode,
+            String gender, String branch
     ) {
-        // 1. Resolve Term
-        Term term;
-        if (termCode != null && !termCode.isEmpty()) {
-            term = termRepository.findByTermCode(termCode)
-                    .orElseThrow(() -> new IllegalArgumentException("Term not found: " + termCode));
-        } else {
-            term = termRepository.findTopByOrderByUpdatedAtDesc()
-                    .orElseThrow(() -> new IllegalArgumentException("No terms found in database"));
-        }
+        Term term = resolveTerm(termCode);
 
-        // 2. Build Specification
         Specification<Section> spec = (root, query, cb) -> {
             List<Predicate> predicates = new ArrayList<>();
 
-            // A. Mandatory Term Filter
+            // 1. Term Filter (Mandatory)
             predicates.add(cb.equal(root.get("term").get("id"), term.getId()));
 
-            // B. Smart Search (q) - Tokenized
+            // 2. Smart Search (q) - Normalized for Course Code + Number or Title
             if (q != null && !q.trim().isEmpty()) {
-                String normalizedQ = q.replaceAll("[-_]", " ")
-                        .replaceAll("([a-zA-Z])(\\d)", "$1 $2")
-                        .replaceAll("(\\d)([a-zA-Z])", "$1 $2");
+                String pattern = "%" + q.toLowerCase().replace("-", "").replace(" ", "") + "%";
+                // Concat code and number to match "CPCS203" or "CPCS 203"
+                Expression<String> fullCourseCode = cb.concat(root.get("course").get("code"), root.get("course").get("number"));
 
-                String[] tokens = normalizedQ.trim().split("\\s+");
-
-                for (String token : tokens) {
-                    String pattern = "%" + token.toLowerCase() + "%";
-                    List<Predicate> orPredicates = new ArrayList<>();
-
-                    // Match Course Fields (ManyToOne - Safe)
-                    orPredicates.add(cb.like(cb.lower(root.get("course").get("title")), pattern));
-                    orPredicates.add(cb.like(cb.lower(root.get("course").get("code")), pattern));
-                    orPredicates.add(cb.like(cb.lower(root.get("course").get("number")), pattern));
-
-                    // Match Section Code
-                    orPredicates.add(cb.like(cb.lower(root.get("code")), pattern));
-
-                    // Match CRN
-                    try {
-                        int crnVal = Integer.parseInt(token);
-                        orPredicates.add(cb.equal(root.get("crn"), crnVal));
-                    } catch (NumberFormatException ignored) { }
-
-                    predicates.add(cb.or(orPredicates.toArray(new Predicate[0])));
-                }
+                predicates.add(cb.or(
+                        cb.like(cb.lower(fullCourseCode), pattern),
+                        cb.like(cb.lower(root.get("course").get("title")), pattern)
+                ));
             }
 
-            // C. Instructor Filter (Using Subquery to avoid duplicates/DISTINCT)
-            if (instructor != null && !instructor.trim().isEmpty()) {
-                String pattern = "%" + instructor.toLowerCase() + "%";
-
-                // 1. Check Primary Instructor
-                Predicate primaryMatch = cb.like(cb.lower(root.get("instructor").get("name")), pattern);
-
-                // 2. Check Schedule Instructors (Subquery)
-                Subquery<Schedule> subquery = query.subquery(Schedule.class);
-                Root<Schedule> subRoot = subquery.from(Schedule.class);
-                subquery.select(subRoot);
-                subquery.where(
-                        cb.equal(subRoot.get("section"), root),
-                        cb.like(cb.lower(subRoot.get("instructor").get("name")), pattern)
-                );
-
-                predicates.add(cb.or(primaryMatch, cb.exists(subquery)));
+            // 3. Instructor Filter
+            if (instructor != null && !instructor.isEmpty()) {
+                predicates.add(cb.like(cb.lower(root.get("instructor").get("name")), "%" + instructor.toLowerCase() + "%"));
             }
 
-            // D. Days Filter (Using Subquery)
-            if (days != null && !days.isEmpty()) {
-                String sortedDays = sortDays(days.toUpperCase());
-
-                Subquery<Schedule> subquery = query.subquery(Schedule.class);
-                Root<Schedule> subRoot = subquery.from(Schedule.class);
-                subquery.select(subRoot);
-                subquery.where(
-                        cb.equal(subRoot.get("section"), root),
-                        cb.like(cb.upper(subRoot.get("days")), "%" + sortedDays + "%")
-                );
-
-                predicates.add(cb.exists(subquery));
-            }
-
-            // E. Time Filters (Using Subquery)
-            if (startTime != null || endTime != null) {
-                Subquery<Schedule> subquery = query.subquery(Schedule.class);
-                Root<Schedule> subRoot = subquery.from(Schedule.class);
-                subquery.select(subRoot);
-
-                List<Predicate> timePredicates = new ArrayList<>();
-                timePredicates.add(cb.equal(subRoot.get("section"), root));
-
-                if (startTime != null) {
-                    Integer min = parseTimeBytes(startTime);
-                    if (min != null) timePredicates.add(cb.greaterThanOrEqualTo(subRoot.get("startTime"), min));
-                }
-                if (endTime != null) {
-                    Integer min = parseTimeBytes(endTime);
-                    if (min != null) timePredicates.add(cb.lessThanOrEqualTo(subRoot.get("endTime"), min));
-                }
-
-                subquery.where(timePredicates.toArray(new Predicate[0]));
-                predicates.add(cb.exists(subquery));
-            }
-
-            // F. Standard Filters
+            // 4. CRN Filter
             if (crn != null && !crn.isEmpty()) {
                 try {
                     predicates.add(cb.equal(root.get("crn"), Integer.parseInt(crn)));
                 } catch (NumberFormatException ignored) {}
             }
 
-            if (level != null && !level.isEmpty()) {
-                predicates.add(cb.like(cb.lower(root.get("level")), "%" + level.toLowerCase() + "%"));
-            }
-
+            // 5. Section Code Filter
             if (sectionCode != null && !sectionCode.isEmpty()) {
                 predicates.add(cb.like(cb.lower(root.get("code")), "%" + sectionCode.toLowerCase() + "%"));
             }
 
-            // G. Gender/Branch Filter
+            // 6. Level Filter
+            if (level != null && !level.isEmpty()) {
+                predicates.add(cb.equal(root.get("level"), level));
+            }
+
+            // 7. Gender/Branch Filter
             if (gender != null && !gender.isEmpty()) {
-                String mappedGender = mapGender(gender);
-                if (mappedGender != null) {
-                    predicates.add(cb.like(cb.lower(root.get("branch")), "%" + mappedGender + "%"));
+                String mapped = mapGender(gender);
+                if (mapped != null) {
+                    predicates.add(cb.like(root.get("branch"), "%" + mapped + "%"));
                 }
             }
 
@@ -179,10 +146,46 @@ public class CatalogService {
                 predicates.add(cb.like(cb.lower(root.get("branch")), "%" + branch.toLowerCase() + "%"));
             }
 
+            // 8. Days and Time Filters (Requiring Subquery to Schedule Table)
+            if ((days != null && !days.isEmpty()) || startTime != null || endTime != null) {
+                // We use a Subquery to avoid duplicate Sections in the result set when multiple schedules match
+                Subquery<Integer> scheduleSubquery = query.subquery(Integer.class);
+                Root<Schedule> scheduleRoot = scheduleSubquery.from(Schedule.class);
+                scheduleSubquery.select(cb.literal(1)); // SELECT 1
+
+                List<Predicate> subPredicates = new ArrayList<>();
+                subPredicates.add(cb.equal(scheduleRoot.get("section"), root));
+
+                // Days Match (e.g., searching "MW" matches schedules containing "M" and "W")
+                if (days != null && !days.isEmpty()) {
+                    String sortedDays = sortDays(days.toUpperCase());
+                    for (char day : sortedDays.toCharArray()) {
+                        subPredicates.add(cb.like(scheduleRoot.get("days"), "%" + day + "%"));
+                    }
+                }
+
+                // Time Range Match
+                if (startTime != null) {
+                    Integer startMin = parseTimeBytes(startTime);
+                    if (startMin != null) {
+                        subPredicates.add(cb.greaterThanOrEqualTo(scheduleRoot.get("startTime"), startMin));
+                    }
+                }
+                if (endTime != null) {
+                    Integer endMin = parseTimeBytes(endTime);
+                    if (endMin != null) {
+                        subPredicates.add(cb.lessThanOrEqualTo(scheduleRoot.get("endTime"), endMin));
+                    }
+                }
+
+                scheduleSubquery.where(cb.and(subPredicates.toArray(new Predicate[0])));
+                predicates.add(cb.exists(scheduleSubquery));
+            }
+
             return cb.and(predicates.toArray(new Predicate[0]));
         };
 
-        // 3. Pagination & Sorting
+        // 9. Pagination & Sorting
         Pageable pageable = PageRequest.of(page - 1, limit,
                 Sort.by("course.code").ascending()
                         .and(Sort.by("course.number").ascending())
@@ -192,32 +195,22 @@ public class CatalogService {
         return sectionRepository.findAll(spec, pageable);
     }
 
-    public Map<String, List<String>> getGroupedSections(String termCode, String courseCode, String sectionCode, String gender) {
+    public Map<String, List<String>> getGroupedSections(String termCode, String courseQuery, String sectionCode, String gender) {
         Term term = resolveTerm(termCode);
-
         List<Section> sections = sectionRepository.findByTermId(term.getId());
 
-        return sections.stream()
-                // 1. Filter by Course
-                .filter(s -> {
-                    if (courseCode == null || courseCode.isEmpty()) return true;
-                    String fullCourseName = s.getCourse().getCode() + "-" + s.getCourse().getNumber();
-                    return fullCourseName.equalsIgnoreCase(courseCode);
-                })
-                // 2. Filter by Section Code
-                .filter(s -> {
-                    if (sectionCode == null || sectionCode.isEmpty()) return true;
-                    return s.getCode().equalsIgnoreCase(sectionCode);
-                })
-                // 3. Gender/Branch Filter
-                .filter(s -> {
-                    if (gender == null || gender.isEmpty()) return true;
-                    if (s.getBranch() == null) return false;
+        final String normalizedQ = (courseQuery == null) ? "" : courseQuery.replace("-", "").replace(" ", "").toLowerCase();
 
-                    if (gender.equalsIgnoreCase("male")) {
-                        return s.getBranch().contains("طلاب");
-                    } else if (gender.equalsIgnoreCase("female")) {
-                        return s.getBranch().contains("طالبات");
+        return sections.stream()
+                .filter(s -> {
+                    if (!normalizedQ.isEmpty()) {
+                        String target = (s.getCourse().getCode() + s.getCourse().getNumber()).toLowerCase();
+                        if (!target.contains(normalizedQ)) return false;
+                    }
+                    if (sectionCode != null && !s.getCode().contains(sectionCode)) return false;
+                    if (gender != null) {
+                        String mapped = mapGender(gender);
+                        return s.getBranch() != null && s.getBranch().contains(Objects.requireNonNull(mapped));
                     }
                     return true;
                 })
@@ -227,81 +220,94 @@ public class CatalogService {
                         Collectors.mapping(Section::getCode, Collectors.toList())
                 ));
     }
+
+    // Not used for now
     public List<InstructorHierarchyDTO> getInstructorHierarchy(String termCode) {
         Term term = resolveTerm(termCode);
-
-        // Fetch all sections in this term
         List<Section> sections = sectionRepository.findByTermId(term.getId());
 
-        // Group by Instructor Name first
-        Map<String, List<Section>> byInstructor = sections.stream()
+        return sections.stream()
                 .filter(s -> s.getInstructor() != null)
-                .collect(Collectors.groupingBy(s -> s.getInstructor().getName()));
+                .collect(Collectors.groupingBy(s -> s.getInstructor().getName()))
+                .entrySet().stream()
+                .map(entry -> {
+                    InstructorHierarchyDTO dto = new InstructorHierarchyDTO();
+                    dto.setName(entry.getKey());
+                    dto.setEmail(entry.getValue().getFirst().getInstructor().getEmail());
+                    return dto;
+                })
+                .sorted(Comparator.comparing(InstructorHierarchyDTO::getName))
+                .collect(Collectors.toList());
+    }
 
-        List<InstructorHierarchyDTO> result = new ArrayList<>();
+    public Course getCourseById(String courseId) {
+        return (Course) sectionRepository.findCourseById(courseId)
+                .orElseThrow(() -> new IllegalArgumentException("Course not found with ID: " + courseId));
+    }
 
-        for (Map.Entry<String, List<Section>> entry : byInstructor.entrySet()) {
-            String instructorName = entry.getKey();
-            List<Section> instructorSections = entry.getValue();
+    public Map<String, Object> getInstructorDetails(String instructorId, String termCode) {
+        Term term = resolveTerm(termCode);
 
-            InstructorHierarchyDTO dto = new InstructorHierarchyDTO();
-            dto.setName(instructorName);
-            // Grab email from the first section found for this instructor
-            dto.setEmail(instructorSections.getFirst().getInstructor().getEmail());
+        // Fetch schedules instead of sections
+        List<Schedule> schedules = scheduleRepository.findByInstructorIdAndSectionTermId(instructorId, term.getId());
 
-            // Subgroup by Course
-            Map<String, List<Section>> byCourse = instructorSections.stream()
-                    .collect(Collectors.groupingBy(s ->
-                            s.getCourse().getCode() + "-" + s.getCourse().getNumber()
-                    ));
-
-            for (Map.Entry<String, List<Section>> courseEntry : byCourse.entrySet()) {
-                InstructorHierarchyDTO.CourseGroup group = new InstructorHierarchyDTO.CourseGroup();
-                group.setCourseLabel(courseEntry.getKey());
-                group.setCourseTitle(courseEntry.getValue().getFirst().getCourse().getTitle());
-
-                // Collect section codes
-                List<String> codes = courseEntry.getValue().stream()
-                        .map(Section::getCode)
-                        .sorted()
-                        .collect(Collectors.toList());
-
-                group.setSections(codes);
-                dto.getCourses().add(group);
-            }
-
-            // Sort courses alphabetically
-            dto.getCourses().sort(Comparator.comparing(InstructorHierarchyDTO.CourseGroup::getCourseLabel));
-
-            result.add(dto);
+        if (schedules.isEmpty()) {
+            throw new IllegalArgumentException("No teaching schedule found for this instructor.");
         }
 
-        // Sort instructors alphabetically
-        result.sort(Comparator.comparing(InstructorHierarchyDTO::getName));
+        Instructor instructor = schedules.getFirst().getInstructor();
+
+        // Grouping by Course Code
+        Map<String, List<Map<String, Object>>> teachingMap = schedules.stream()
+                .collect(Collectors.groupingBy(
+                        sch -> sch.getSection().getCourse().getCode() + "-" + sch.getSection().getCourse().getNumber(),
+                        Collectors.mapping(sch -> {
+                            Map<String, Object> details = new HashMap<>();
+                            details.put("sectionCode", sch.getSection().getCode());
+                            details.put("crn", sch.getSection().getCrn());
+                            details.put("days", sch.getDays());
+                            details.put("time", sch.getRawTime());
+                            details.put("location", sch.getLocation());
+                            return details;
+                        }, Collectors.toList())
+                ));
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("instructorName", instructor.getName());
+        result.put("email", instructor.getEmail());
+        result.put("term", term.getTermCode());
+        result.put("schedule", teachingMap);
+
         return result;
     }
 
-    // Helper to reuse term resolution logic
+    // --- Helpers ---
+
     private Term resolveTerm(String termCode) {
         if (termCode != null && !termCode.isEmpty()) {
             return termRepository.findByTermCode(termCode)
                     .orElseThrow(() -> new IllegalArgumentException("Term not found: " + termCode));
-        } else {
-            return termRepository.findTopByOrderByUpdatedAtDesc()
-                    .orElseThrow(() -> new IllegalArgumentException("No terms found in database"));
         }
-    }
-
-    private String sortDays(String input) {
-        String dayOrder = "MTWRFSU";
-        return Arrays.stream(input.split(""))
-                .sorted((a, b) -> dayOrder.indexOf(a) - dayOrder.indexOf(b))
-                .collect(Collectors.joining());
+        return termRepository.findTopByOrderByUpdatedAtDesc()
+                .orElseThrow(() -> new IllegalArgumentException("No terms found in database"));
     }
 
     private String mapGender(String input) {
         if ("male".equalsIgnoreCase(input)) return "طلاب";
         if ("female".equalsIgnoreCase(input)) return "طالبات";
         return null;
+    }
+
+    private Integer parseTimeBytes(String timeStr) {
+        if (timeStr == null || !timeStr.matches("\\d{1,2}:\\d{2}")) return null;
+        String[] parts = timeStr.split(":");
+        return Integer.parseInt(parts[0]) * 60 + Integer.parseInt(parts[1]);
+    }
+
+    private String sortDays(String input) {
+        String dayOrder = "MTWRFSU";
+        return Arrays.stream(input.split(""))
+                .sorted(Comparator.comparingInt(dayOrder::indexOf))
+                .collect(Collectors.joining());
     }
 }
