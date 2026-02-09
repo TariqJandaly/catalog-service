@@ -1,6 +1,5 @@
 package com.kaustack.catalog.controller;
 
-import com.kaustack.catalog.dto.InstructorHierarchyDTO;
 import com.kaustack.catalog.dto.SectionDTO;
 import com.kaustack.catalog.model.Section;
 import com.kaustack.catalog.service.CatalogMapper;
@@ -16,8 +15,8 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 @RestController
-@RequestMapping("/")
-public class CatalogController {
+@RequestMapping("/catalog/search")
+public class SearchController {
 
     @Autowired
     private CatalogService catalogService;
@@ -25,7 +24,7 @@ public class CatalogController {
     @Autowired
     private CatalogMapper mapper;
 
-    @GetMapping("/search")
+    @GetMapping
     public ResponseEntity<Map<String, Object>> search(
             @RequestParam(required = false) String termCode,
             @RequestParam(required = false) String q,
@@ -60,36 +59,6 @@ public class CatalogController {
 
         response.put("meta", meta);
         response.put("data", dtos);
-
-        return ResponseEntity.ok(response);
-    }
-
-    @GetMapping("/sections")
-    public ResponseEntity<Map<String, Object>> getSections(
-            @RequestParam(required = false) String termCode,
-            @RequestParam(required = false) String course,
-            @RequestParam(required = false) String section,
-            @RequestParam(required = false) String gender
-    ) {
-        Map<String, List<String>> groupedSections = catalogService.getGroupedSections(termCode, course, section, gender);
-
-        Map<String, Object> response = new HashMap<>();
-        response.put("status", "success");
-        response.put("data", groupedSections);
-
-        return ResponseEntity.ok(response);
-    }
-
-    @GetMapping("/instructors")
-    public ResponseEntity<Map<String, Object>> getInstructors(
-            @RequestParam(required = false) String termCode
-    ) {
-        List<InstructorHierarchyDTO> instructors = catalogService.getInstructorHierarchy(termCode);
-
-        Map<String, Object> response = new HashMap<>();
-        response.put("status", "success");
-        response.put("count", instructors.size());
-        response.put("data", instructors);
 
         return ResponseEntity.ok(response);
     }
