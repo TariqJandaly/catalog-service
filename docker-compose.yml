@@ -1,0 +1,24 @@
+services:
+  catalog:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: catalog
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+
+      # Database configuration
+      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_USERNAME: ${DATABASE_USERNAME}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD}
+
+      # Data loader
+      LOAD_DATA: ${LOAD_DATA:-false}
+      COURSES_URL: ${COURSES_URL:-http://localhost:80/courses}
+      INSTRUCTORS_URL: ${INSTRUCTORS_URL:-http://localhost:80/instructors}
+
+      # Eureka
+      EUREKA_DEFAULTZONE: ${EUREKA_DEFAULTZONE:-http://localhost:8761/eureka}
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
