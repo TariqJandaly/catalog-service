@@ -12,7 +12,6 @@ import java.util.List;
         @Index(name = "idx_term_course", columnList = "term_id, course_id")})
 public class Section {
     @Id
-    @GeneratedValue(strategy = GenerationType.UUID)
     private String id;
 
     private Integer crn;

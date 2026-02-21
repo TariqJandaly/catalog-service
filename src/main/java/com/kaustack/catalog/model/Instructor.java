@@ -9,7 +9,6 @@ import java.util.List;
 @Data
 public class Instructor {
     @Id
-    @GeneratedValue(strategy = GenerationType.UUID)
     private String id;
 
     @Column(unique = true)
