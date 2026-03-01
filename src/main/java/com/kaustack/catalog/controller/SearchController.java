@@ -15,7 +15,7 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 @RestController
-@RequestMapping("/search")
+@RequestMapping("/sections")
 public class SearchController {
 
     @Autowired
